@@ -5,6 +5,9 @@
 (define-constant err-unauthorized (err u103))
 (define-constant err-already-listed (err u104))
 (define-constant err-not-listed (err u105))
+(define-constant err-already-rated (err u106))
+(define-constant err-invalid-rating (err u107))
+(define-constant err-not-owner (err u108))
 
 (define-non-fungible-token carbon-credit uint)
 
@@ -25,6 +28,26 @@
 (define-map project-verifiers
     { verifier: principal }
     { active: bool }
+)
+
+(define-map credit-ratings
+    {
+        credit-id: uint,
+        rater: principal,
+    }
+    {
+        rating: uint,
+        comment: (string-ascii 100),
+    }
+)
+
+(define-map credit-reputation
+    { credit-id: uint }
+    {
+        total-rating: uint,
+        rating-count: uint,
+        average-rating: uint,
+    }
 )
 
 (define-data-var next-credit-id uint u1)
@@ -163,4 +186,64 @@
             })
         ))
     )
+)
+
+(define-public (rate-credit
+        (credit-id uint)
+        (rating uint)
+        (comment (string-ascii 100))
+    )
+    (let (
+            (credit (unwrap! (map-get? credit-data { credit-id: credit-id })
+                err-not-found
+            ))
+            (existing-rating (map-get? credit-ratings {
+                credit-id: credit-id,
+                rater: tx-sender,
+            }))
+            (current-reputation (default-to {
+                total-rating: u0,
+                rating-count: u0,
+                average-rating: u0,
+            }
+                (map-get? credit-reputation { credit-id: credit-id })
+            ))
+        )
+        (asserts! (not (is-eq tx-sender (get owner credit))) err-not-owner)
+        (asserts! (and (>= rating u1) (<= rating u5)) err-invalid-rating)
+        (asserts! (is-none existing-rating) err-already-rated)
+        (map-set credit-ratings {
+            credit-id: credit-id,
+            rater: tx-sender,
+        } {
+            rating: rating,
+            comment: comment,
+        })
+        (let (
+                (new-total-rating (+ (get total-rating current-reputation) rating))
+                (new-rating-count (+ (get rating-count current-reputation) u1))
+                (new-average-rating (/ new-total-rating new-rating-count))
+            )
+            (map-set credit-reputation { credit-id: credit-id } {
+                total-rating: new-total-rating,
+                rating-count: new-rating-count,
+                average-rating: new-average-rating,
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-credit-reputation (credit-id uint))
+    (map-get? credit-reputation { credit-id: credit-id })
+)
+
+(define-read-only (get-credit-rating
+        (credit-id uint)
+        (rater principal)
+    )
+    (map-get? credit-ratings {
+        credit-id: credit-id,
+        rater: rater,
+    })
 )
