@@ -8,6 +8,10 @@
 (define-constant err-already-rated (err u106))
 (define-constant err-invalid-rating (err u107))
 (define-constant err-not-owner (err u108))
+(define-constant err-auction-not-found (err u109))
+(define-constant err-auction-ended (err u110))
+(define-constant err-auction-active (err u111))
+(define-constant err-bid-too-low (err u112))
 
 (define-non-fungible-token carbon-credit uint)
 
@@ -52,6 +56,20 @@
 
 (define-data-var next-credit-id uint u1)
 (define-data-var marketplace-fee uint u25)
+(define-data-var next-auction-id uint u1)
+
+(define-map auction-data
+    { auction-id: uint }
+    {
+        credit-id: uint,
+        seller: principal,
+        starting-price: uint,
+        current-bid: uint,
+        highest-bidder: (optional principal),
+        end-block: uint,
+        active: bool,
+    }
+)
 
 (define-public (register-verifier (verifier principal))
     (begin
@@ -246,4 +264,105 @@
         credit-id: credit-id,
         rater: rater,
     })
+)
+
+(define-public (create-auction
+        (credit-id uint)
+        (starting-price uint)
+        (duration uint)
+    )
+    (let (
+            (credit (unwrap! (map-get? credit-data { credit-id: credit-id })
+                err-not-found
+            ))
+            (owner (get owner credit))
+            (auction-id (var-get next-auction-id))
+            (end-block (+ burn-block-height duration))
+        )
+        (asserts! (is-eq tx-sender owner) err-unauthorized)
+        (asserts! (not (get listed credit)) err-already-listed)
+        (asserts! (> starting-price u0) err-invalid-amount)
+        (map-set auction-data { auction-id: auction-id } {
+            credit-id: credit-id,
+            seller: tx-sender,
+            starting-price: starting-price,
+            current-bid: starting-price,
+            highest-bidder: none,
+            end-block: end-block,
+            active: true,
+        })
+        (var-set next-auction-id (+ auction-id u1))
+        (ok auction-id)
+    )
+)
+
+(define-public (place-bid
+        (auction-id uint)
+        (bid-amount uint)
+    )
+    (let (
+            (auction (unwrap! (map-get? auction-data { auction-id: auction-id })
+                err-auction-not-found
+            ))
+            (current-bid (get current-bid auction))
+            (previous-bidder (get highest-bidder auction))
+        )
+        (asserts! (get active auction) err-auction-ended)
+        (asserts! (< burn-block-height (get end-block auction)) err-auction-ended)
+        (asserts! (> bid-amount current-bid) err-bid-too-low)
+        (asserts! (>= (stx-get-balance tx-sender) bid-amount) err-invalid-amount)
+        (match previous-bidder
+            bidder (try! (stx-transfer? current-bid contract-caller bidder))
+            true
+        )
+        (try! (stx-transfer? bid-amount tx-sender contract-caller))
+        (map-set auction-data { auction-id: auction-id }
+            (merge auction {
+                current-bid: bid-amount,
+                highest-bidder: (some tx-sender),
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-public (finalize-auction (auction-id uint))
+    (let (
+            (auction (unwrap! (map-get? auction-data { auction-id: auction-id })
+                err-auction-not-found
+            ))
+            (credit-id (get credit-id auction))
+            (seller (get seller auction))
+            (winner (get highest-bidder auction))
+            (final-price (get current-bid auction))
+        )
+        (asserts! (get active auction) err-auction-ended)
+        (asserts! (>= burn-block-height (get end-block auction))
+            err-auction-active
+        )
+        (match winner
+            bidder (begin
+                (try! (stx-transfer? final-price contract-caller seller))
+                (try! (nft-transfer? carbon-credit credit-id seller bidder))
+                (map-set credit-data { credit-id: credit-id }
+                    (merge
+                        (unwrap-panic (map-get? credit-data { credit-id: credit-id })) {
+                        owner: bidder,
+                        listed: false,
+                    })
+                )
+            )
+            (begin
+                (try! (stx-transfer? final-price contract-caller seller))
+            )
+        )
+        (map-set auction-data { auction-id: auction-id }
+            (merge auction { active: false })
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-auction-data (auction-id uint))
+    (map-get? auction-data { auction-id: auction-id })
 )
