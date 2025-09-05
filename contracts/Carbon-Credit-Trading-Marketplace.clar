@@ -12,6 +12,8 @@
 (define-constant err-auction-ended (err u110))
 (define-constant err-auction-active (err u111))
 (define-constant err-bid-too-low (err u112))
+(define-constant err-credit-retired (err u113))
+(define-constant err-zero-retirement (err u114))
 
 (define-non-fungible-token carbon-credit uint)
 
@@ -51,6 +53,16 @@
         total-rating: uint,
         rating-count: uint,
         average-rating: uint,
+    }
+)
+
+(define-map retired-credits
+    { credit-id: uint }
+    {
+        retired-by: principal,
+        retirement-block: uint,
+        retirement-reason: (string-ascii 100),
+        retired-quantity: uint,
     }
 )
 
@@ -163,7 +175,10 @@
             (seller (get owner credit))
         )
         (asserts! (get listed credit) err-not-listed)
-        (asserts! (is-eq (stx-get-balance tx-sender) price) err-invalid-amount)
+        (asserts! (is-none (map-get? retired-credits { credit-id: credit-id }))
+            err-credit-retired
+        )
+        (asserts! (>= (stx-get-balance tx-sender) price) err-invalid-amount)
         (try! (stx-transfer? price tx-sender seller))
         (try! (nft-transfer? carbon-credit credit-id seller tx-sender))
         (ok (map-set credit-data { credit-id: credit-id }
@@ -196,6 +211,9 @@
             (owner (get owner credit))
         )
         (asserts! (is-eq tx-sender owner) err-unauthorized)
+        (asserts! (is-none (map-get? retired-credits { credit-id: credit-id }))
+            err-credit-retired
+        )
         (try! (nft-transfer? carbon-credit credit-id tx-sender recipient))
         (ok (map-set credit-data { credit-id: credit-id }
             (merge credit {
@@ -365,4 +383,38 @@
 
 (define-read-only (get-auction-data (auction-id uint))
     (map-get? auction-data { auction-id: auction-id })
+)
+
+(define-public (retire-credits
+        (credit-id uint)
+        (retirement-reason (string-ascii 100))
+    )
+    (let (
+            (credit (unwrap! (map-get? credit-data { credit-id: credit-id })
+                err-not-found
+            ))
+            (owner (get owner credit))
+            (quantity (get quantity credit))
+        )
+        (asserts! (is-eq tx-sender owner) err-unauthorized)
+        (asserts! (is-none (map-get? retired-credits { credit-id: credit-id }))
+            err-credit-retired
+        )
+        (asserts! (> quantity u0) err-zero-retirement)
+        (map-set retired-credits { credit-id: credit-id } {
+            retired-by: tx-sender,
+            retirement-block: burn-block-height,
+            retirement-reason: retirement-reason,
+            retired-quantity: quantity,
+        })
+        (ok true)
+    )
+)
+
+(define-read-only (get-retirement-data (credit-id uint))
+    (map-get? retired-credits { credit-id: credit-id })
+)
+
+(define-read-only (is-credit-retired (credit-id uint))
+    (is-some (map-get? retired-credits { credit-id: credit-id }))
 )
