@@ -14,6 +14,10 @@
 (define-constant err-bid-too-low (err u112))
 (define-constant err-credit-retired (err u113))
 (define-constant err-zero-retirement (err u114))
+(define-constant err-escrow-not-found (err u115))
+(define-constant err-escrow-not-active (err u116))
+(define-constant err-insufficient-payment (err u117))
+(define-constant err-not-escrow-party (err u118))
 
 (define-non-fungible-token carbon-credit uint)
 
@@ -69,6 +73,7 @@
 (define-data-var next-credit-id uint u1)
 (define-data-var marketplace-fee uint u25)
 (define-data-var next-auction-id uint u1)
+(define-data-var next-escrow-id uint u1)
 
 (define-map auction-data
     { auction-id: uint }
@@ -80,6 +85,19 @@
         highest-bidder: (optional principal),
         end-block: uint,
         active: bool,
+    }
+)
+
+(define-map escrow-data
+    { escrow-id: uint }
+    {
+        credit-id: uint,
+        seller: principal,
+        buyer: principal,
+        price: uint,
+        created-block: uint,
+        active: bool,
+        funds-deposited: bool,
     }
 )
 
@@ -417,4 +435,126 @@
 
 (define-read-only (is-credit-retired (credit-id uint))
     (is-some (map-get? retired-credits { credit-id: credit-id }))
+)
+
+(define-public (create-escrow
+        (credit-id uint)
+        (buyer principal)
+        (price uint)
+    )
+    (let (
+            (credit (unwrap! (map-get? credit-data { credit-id: credit-id })
+                err-not-found
+            ))
+            (owner (get owner credit))
+            (escrow-id (var-get next-escrow-id))
+        )
+        (asserts! (is-eq tx-sender owner) err-unauthorized)
+        (asserts! (is-none (map-get? retired-credits { credit-id: credit-id }))
+            err-credit-retired
+        )
+        (asserts! (> price u0) err-invalid-amount)
+        (map-set escrow-data { escrow-id: escrow-id } {
+            credit-id: credit-id,
+            seller: tx-sender,
+            buyer: buyer,
+            price: price,
+            created-block: burn-block-height,
+            active: true,
+            funds-deposited: false,
+        })
+        (map-set credit-data { credit-id: credit-id }
+            (merge credit { listed: false })
+        )
+        (var-set next-escrow-id (+ escrow-id u1))
+        (ok escrow-id)
+    )
+)
+
+(define-public (deposit-escrow-funds (escrow-id uint))
+    (let (
+            (escrow (unwrap! (map-get? escrow-data { escrow-id: escrow-id })
+                err-escrow-not-found
+            ))
+            (buyer (get buyer escrow))
+            (price (get price escrow))
+        )
+        (asserts! (get active escrow) err-escrow-not-active)
+        (asserts! (is-eq tx-sender buyer) err-not-escrow-party)
+        (asserts! (not (get funds-deposited escrow)) err-invalid-amount)
+        (asserts! (>= (stx-get-balance tx-sender) price) err-insufficient-payment)
+        (try! (stx-transfer? price tx-sender (as-contract tx-sender)))
+        (map-set escrow-data { escrow-id: escrow-id }
+            (merge escrow { funds-deposited: true })
+        )
+        (ok true)
+    )
+)
+
+(define-public (complete-escrow (escrow-id uint))
+    (let (
+            (escrow (unwrap! (map-get? escrow-data { escrow-id: escrow-id })
+                err-escrow-not-found
+            ))
+            (credit-id (get credit-id escrow))
+            (seller (get seller escrow))
+            (buyer (get buyer escrow))
+            (price (get price escrow))
+            (credit (unwrap! (map-get? credit-data { credit-id: credit-id })
+                err-not-found
+            ))
+        )
+        (asserts! (get active escrow) err-escrow-not-active)
+        (asserts! (get funds-deposited escrow) err-insufficient-payment)
+        (asserts! (or (is-eq tx-sender seller) (is-eq tx-sender buyer))
+            err-not-escrow-party
+        )
+        (try! (as-contract (stx-transfer? price tx-sender seller)))
+        (try! (nft-transfer? carbon-credit credit-id seller buyer))
+        (map-set credit-data { credit-id: credit-id }
+            (merge credit {
+                owner: buyer,
+                listed: false,
+            })
+        )
+        (map-set escrow-data { escrow-id: escrow-id }
+            (merge escrow { active: false })
+        )
+        (ok true)
+    )
+)
+
+(define-public (cancel-escrow (escrow-id uint))
+    (let (
+            (escrow (unwrap! (map-get? escrow-data { escrow-id: escrow-id })
+                err-escrow-not-found
+            ))
+            (seller (get seller escrow))
+            (buyer (get buyer escrow))
+            (price (get price escrow))
+            (funds-deposited (get funds-deposited escrow))
+        )
+        (asserts! (get active escrow) err-escrow-not-active)
+        (asserts! (or (is-eq tx-sender seller) (is-eq tx-sender buyer))
+            err-not-escrow-party
+        )
+        (if funds-deposited
+            (try! (as-contract (stx-transfer? price tx-sender buyer)))
+            true
+        )
+        (map-set escrow-data { escrow-id: escrow-id }
+            (merge escrow { active: false })
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-escrow-data (escrow-id uint))
+    (map-get? escrow-data { escrow-id: escrow-id })
+)
+
+(define-read-only (is-escrow-active (escrow-id uint))
+    (default-to false
+        (get active (map-get? escrow-data { escrow-id: escrow-id }))
+    )
 )
