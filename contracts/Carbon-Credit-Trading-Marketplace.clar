@@ -558,3 +558,72 @@
         (get active (map-get? escrow-data { escrow-id: escrow-id }))
     )
 )
+
+(define-read-only (get-marketplace-fee)
+    (var-get marketplace-fee)
+)
+
+(define-read-only (quote-total-cost (price uint))
+    (let (
+            (fee (var-get marketplace-fee))
+            (fee-amount (/ (* price fee) u100))
+            (total (+ price fee-amount))
+        )
+        {
+            price: price,
+            fee: fee,
+            fee-amount: fee-amount,
+            total: total,
+        }
+    )
+)
+
+(define-public (set-marketplace-fee (new-fee uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (<= new-fee u100) err-invalid-amount)
+        (ok (var-set marketplace-fee new-fee))
+    )
+)
+
+(define-public (buy-credits-with-fee (credit-id uint))
+    (let (
+            (credit (unwrap! (map-get? credit-data { credit-id: credit-id })
+                err-not-found
+            ))
+            (price (get price credit))
+            (seller (get owner credit))
+            (fee (var-get marketplace-fee))
+            (fee-amount (/ (* price fee) u100))
+            (total (+ price fee-amount))
+        )
+        (asserts! (get listed credit) err-not-listed)
+        (asserts! (is-none (map-get? retired-credits { credit-id: credit-id }))
+            err-credit-retired
+        )
+        (asserts! (>= (stx-get-balance tx-sender) total) err-invalid-amount)
+        (try! (stx-transfer? price tx-sender seller))
+        (if (> fee-amount u0)
+            (try! (stx-transfer? fee-amount tx-sender contract-caller))
+            true
+        )
+        (try! (nft-transfer? carbon-credit credit-id seller tx-sender))
+        (ok (map-set credit-data { credit-id: credit-id }
+            (merge credit {
+                owner: tx-sender,
+                listed: false,
+            })
+        ))
+    )
+)
+
+(define-public (withdraw-fees
+        (amount uint)
+        (recipient principal)
+    )
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (try! (stx-transfer? amount contract-caller recipient))
+        (ok true)
+    )
+)
